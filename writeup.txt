@@ -1,0 +1,66 @@
+How This Strategy Works:
+======================
+
+The idea is pretty simple. the stock market behaves differently depending on
+whether we're in a calm period or a volatile one. if i can figure out which
+"regime" we're currently in, i can adjust how much of my money is in the market.
+
+I used a Hidden Markov Model (HMM) to classify VIX data into 3 regimes: low
+volatility, medium volatility, and high volatility. The model looks at VIX
+closing prices, daily returns, and 20-day rolling volatility as its features.
+
+When the model says we're in low vol, I go fully long SPY. Medium vol, I go
+half. High vol, I sit out completely. I rebalance once a month.
+
+The key thing is walk-forward testing. the model only ever sees past data when
+making predictions. Each month I refit the HMM on everything before that month,
+predict the current regime, and trade on that. No lookahead bias.
+
+
+Problems I Ran Into
+===================
+
+1. OVERFITTING WITH FULL-SAMPLE HMM
+
+The first version of this strategy fit the HMM on ALL the data at once and then
+used those regime labels to trade. The equity curve tracked SPY almost perfectly
+because the model could see the future. The drawdown hit basically 0% which made
+no sense. I had to completely restructure the code to use walk-forward testing
+where the model only trains on past data. This was the hardest part of the whole
+project, I had to build a loop that iterates month by month, slices the data
+correctly, fits a fresh model each time, and stores the predictions.
+
+2. REGIME LABEL INCONSISTENCY
+
+After switching to walk-forward, the strategy was almost always flat (signal = 0).
+Turns out the HMM assigns regime numbers randomly each time you fit it. So regime
+0 might mean "low vol" in January's model but "high vol" in February's model. My
+mapping of {0: full long, 1: half, 2: flat} was basically random.
+
+I fixed this by checking model.means_ after each fit, which tells you the average
+VIX level for each regime. I used np.argsort to sort regimes by their mean VIX
+and built the signal mapping dynamically each month. Lowest VIX regime always maps
+to full long regardless of what number the HMM assigned it.
+
+3. DATE ALIGNMENT BETWEEN VIX AND SPY
+
+VIX data came from yfinance with clean dates like "2023-01-04". SPY data came from
+Polygon's API with timestamps like "2023-01-04 05:00:00". When I tried to multiply
+the signal by SPY returns, everything came out NaN because pandas couldn't match the
+dates. I had to normalize the SPY index to strip the time component.
+
+4. DAILY VS MONTHLY SIGNAL
+
+Early versions had the HMM predicting a regime for every single day within each
+month. This meant the signal was flipping between 0, 0.5, and 1 almost daily,
+which isn't realistic -- the whole point was monthly rebalancing. It also inflated
+the Sharpe ratio because the model was using within-month information it wouldn't
+have in practice. I fixed it by predicting only on the last day of training data
+and holding that signal for the entire month.
+
+5. YFINANCE CSV FORMATTING
+
+When I saved VIX data to CSV to avoid rate limiting, yfinance's multi-level column
+headers created extra rows in the file. The "Close" column was being read as strings
+instead of numbers, which broke pct_change(). I had to use skiprows=[1,2] when
+reading the CSV to skip the junk header rows.
